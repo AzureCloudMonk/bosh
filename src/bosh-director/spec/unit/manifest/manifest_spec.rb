@@ -3,7 +3,7 @@ require 'spec_helper'
 module Bosh::Director
   describe Manifest do
     subject(:manifest_object) do
-      described_class.new(manifest_hash, manifest_text, cloud_config_hash, runtime_config_hash)
+      described_class.new(manifest_hash, manifest_text, cloud_config_hash, runtime_config_hash, [])
     end
 
     let(:manifest_hash) do
@@ -58,6 +58,7 @@ module Bosh::Director
         allow(deployment_model).to receive(:manifest_text).and_return(manifest_text)
         allow(deployment_model).to receive(:cloud_configs).and_return([cloud_config])
         allow(deployment_model).to receive(:runtime_configs).and_return(runtime_configs)
+        allow(deployment_model).to receive(:teams).and_return([])
         allow(variables_interpolator).to receive(:interpolate_deployment_manifest).and_return(manifest_hash)
         allow(Bosh::Director::RuntimeConfig::RuntimeConfigsConsolidator).to receive(:new).with(runtime_configs).and_return(consolidated_runtime_config)
         allow(consolidated_runtime_config).to receive(:raw_manifest).and_return('raw_runtime' => '((foo))')
@@ -86,6 +87,7 @@ module Bosh::Director
           allow(deployment_model).to receive(:manifest_text).and_return(nil)
           allow(deployment_model).to receive(:cloud_configs).and_return([cloud_config])
           allow(deployment_model).to receive(:runtime_configs).and_return([])
+          allow(deployment_model).to receive(:teams).and_return([])
           allow(Bosh::Director::RuntimeConfig::RuntimeConfigsConsolidator).to receive(:new).with([]).and_return(consolidated_runtime_config)
           allow(consolidated_runtime_config).to receive(:raw_manifest).with([]).and_return({})
           allow(consolidated_runtime_config).to receive(:interpolate_manifest_for_deployment).and_return({})
@@ -106,6 +108,7 @@ module Bosh::Director
           allow(Api::CloudConfigManager).to receive(:interpolated_manifest).and_return({})
           allow(deployment_model).to receive(:manifest).and_return("{'name': 'surfing_deployment', 'smurf': '((smurf_placeholder))'}")
           allow(deployment_model).to receive(:cloud_configs).and_return([cloud_config])
+          allow(deployment_model).to receive(:teams).and_return([])
         end
 
         it 'calls the manifest resolver with correct values' do
@@ -161,12 +164,12 @@ module Bosh::Director
 
       it 'creates a manifest object from a cloud config, a manifest text, and a runtime config' do
         expect(
-          Manifest.load_from_hash(manifest_hash, manifest_text, [cloud_config], runtime_configs).to_yaml
+          Manifest.load_from_hash(manifest_hash, manifest_text, [cloud_config], runtime_configs, []).to_yaml
         ).to eq(manifest_object.to_yaml)
       end
 
       it 'ignores cloud config when ignore_cloud_config is true' do
-        result = Manifest.load_from_hash(manifest_hash, YAML.dump(manifest_hash), [cloud_config], runtime_configs, ignore_cloud_config: true)
+        result = Manifest.load_from_hash(manifest_hash, YAML.dump(manifest_hash), [cloud_config], runtime_configs, [], ignore_cloud_config: true)
         expect(result.manifest_hash).to eq({})
         expect(result.cloud_config_hash).to eq(nil)
         expect(result.runtime_config_hash).to eq(runtime_config_hash)
@@ -183,7 +186,7 @@ module Bosh::Director
 
         it 'calls the manifest resolver with correct values' do
           expect(variables_interpolator).to receive(:interpolate_deployment_manifest).with('smurf' => '((smurf_placeholder))').and_return('smurf' => 'blue')
-          manifest_object_result = Manifest.load_from_hash(passed_in_manifest_hash, YAML.dump(passed_in_manifest_hash), [cloud_config], runtime_configs)
+          manifest_object_result = Manifest.load_from_hash(passed_in_manifest_hash, YAML.dump(passed_in_manifest_hash), [cloud_config], runtime_configs, [])
           expect(manifest_object_result.manifest_hash).to eq('smurf' => 'blue')
           expect(manifest_object_result.cloud_config_hash).to eq(cloud_config.raw_manifest)
           expect(manifest_object_result.runtime_config_hash).to eq(runtime_config_hash)
@@ -192,7 +195,7 @@ module Bosh::Director
         it 'respects resolve_interpolation flag when calling the manifest resolver' do
           expect(variables_interpolator).to_not receive(:interpolate_deployment_manifest)
 
-          manifest_object_result = Manifest.load_from_hash(passed_in_manifest_hash, YAML.dump(passed_in_manifest_hash), [cloud_config], runtime_configs, resolve_interpolation: false)
+          manifest_object_result = Manifest.load_from_hash(passed_in_manifest_hash, YAML.dump(passed_in_manifest_hash), [cloud_config], runtime_configs, [], resolve_interpolation: false)
           expect(manifest_object_result.manifest_hash).to eq('smurf' => '((smurf_placeholder))')
           expect(manifest_object_result.cloud_config_hash).to eq(cloud_config.raw_manifest)
           expect(manifest_object_result.runtime_config_hash).to eq(runtime_config_hash)
@@ -482,11 +485,13 @@ module Bosh::Director
           YAML.dump(new_manifest_hash),
           new_cloud_config_hash,
           new_runtime_config_hash,
+          []
         )
       end
 
       let(:new_manifest_hash) do
         {
+          'releases' => [],
           'properties' => {
             'something' => 'worth-redacting'
           },
@@ -516,8 +521,8 @@ module Bosh::Director
           expect(Bosh::Director::Changeset).to receive(:new).and_return(mock_changeset)
           expect(mock_changeset).to receive(:diff).with(true).and_return(diff_return)
           expect(diff_return).to receive(:order)
-          expect(manifest_object).to receive(:to_hash).and_return({})
-          expect(new_manifest_object).to receive(:to_hash).and_return({})
+          expect(manifest_object).to receive(:to_hash_filter_addons).and_return({})
+          expect(new_manifest_object).to receive(:to_hash_filter_addons).and_return({})
           manifest_object.diff(new_manifest_object, redact)
         end
       end
@@ -583,6 +588,42 @@ module Bosh::Director
                                                          'properties' => {
                                                            'test' => '((test_placeholder))'
                                                          })
+      end
+
+      context 'when runtime config contains an addon that is not applicable to the deployment' do
+        let(:manifest_hash) do
+          {
+            'name' => 'test_deployment',
+            'releases' => [
+              { 'name' => 'simple', 'version' => '2' }
+            ],
+          }
+        end
+
+        let(:runtime_config_hash) do
+          {
+            'releases' => [
+              { 'name' => 'runtime_release', 'version' => '2' }
+            ],
+            'addons' => [
+              {
+                'name' => 'test',
+                'exclude' => {
+                  'deployments' => ['test_deployment']
+                },
+                'jobs' => [{
+                  'name' => 'addon_job',
+                  'release' => 'runtime_release'
+                }]
+              }
+            ]
+          }
+        end
+
+        it 'returns the merged hashes without the addon and release' do
+          expect(manifest_object.to_hash_filter_addons).to eq(manifest_hash)
+        end
+
       end
 
       context 'when runtime config contains same release/version or variables as deployment manifest' do

@@ -7,18 +7,18 @@ module Bosh::Director
       manifest_text = deployment_model.manifest_text || '{}'
       consolidated_runtime_config = Bosh::Director::RuntimeConfig::RuntimeConfigsConsolidator.new(deployment_model.runtime_configs)
       consolidated_cloud_config = Bosh::Director::CloudConfig::CloudConfigsConsolidator.new(deployment_model.cloud_configs)
-      load_manifest(YAML.safe_load(manifest, [Symbol], [], true), manifest_text, consolidated_cloud_config, consolidated_runtime_config, options)
+      load_manifest(YAML.safe_load(manifest, [Symbol], [], true), manifest_text, consolidated_cloud_config, consolidated_runtime_config, deployment_model.teams, options)
     end
 
-    def self.load_from_hash(manifest_hash, manifest_text, cloud_configs, runtime_configs, options = {})
+    def self.load_from_hash(manifest_hash, manifest_text, cloud_configs, runtime_configs, teams, options = {})
       consolidated_runtime_config = Bosh::Director::RuntimeConfig::RuntimeConfigsConsolidator.new(runtime_configs)
       consolidated_cloud_config = Bosh::Director::CloudConfig::CloudConfigsConsolidator.new(cloud_configs)
-      load_manifest(manifest_hash, manifest_text, consolidated_cloud_config, consolidated_runtime_config, options)
+      load_manifest(manifest_hash, manifest_text, consolidated_cloud_config, consolidated_runtime_config, teams, options)
     end
 
-    def self.generate_empty_manifest
+    def self.generate_empty_manifest(teams = [])
       consolidated_runtime_config = Bosh::Director::RuntimeConfig::RuntimeConfigsConsolidator.new([])
-      load_manifest({}, '{}', nil, consolidated_runtime_config, resolve_interpolation: false)
+      load_manifest({}, '{}', nil, consolidated_runtime_config, teams, resolve_interpolation: false)
     end
 
     attr_reader :manifest_hash
@@ -26,11 +26,12 @@ module Bosh::Director
     attr_reader :runtime_config_hash
     attr_reader :manifest_text
 
-    def initialize(manifest_hash, manifest_text, cloud_config_hash, runtime_config_hash)
+    def initialize(manifest_hash, manifest_text, cloud_config_hash, runtime_config_hash, teams)
       @manifest_hash = manifest_hash
       @cloud_config_hash = cloud_config_hash
       @runtime_config_hash = runtime_config_hash
       @manifest_text = manifest_text
+      @teams = teams
     end
 
     def resolve_aliases
@@ -38,6 +39,7 @@ module Bosh::Director
     end
 
     def diff(other_manifest, redact)
+      # Changeset.new(to_hash_filter_addons, other_manifest.to_hash_filter_addons).diff(redact).order
       Changeset.new(to_hash, other_manifest.to_hash).diff(redact).order
     end
 
@@ -45,9 +47,48 @@ module Bosh::Director
       merge_manifests(@manifest_hash, @cloud_config_hash, @runtime_config_hash)
     end
 
+    def to_hash_filter_addons
+      deployment = DeploymentConfig.new(@manifest_hash, @teams.map(&:name))
+      filtered_runtime_config = filter_addons(@runtime_config_hash, deployment)
+      merge_manifests(@manifest_hash, @cloud_config_hash, filtered_runtime_config)
+    end
+
+    def filter_addons(runtime_manifest, deployment)
+      return deployment.manifest_hash unless deployment.has_releases?
+
+      filtered_runtime_manifest = Bosh::Common::DeepCopy.copy(runtime_manifest)
+      runtime_manifest_parser = Bosh::Director::RuntimeConfig::RuntimeManifestParser.new(Config.logger)
+      parsed_runtime_config = runtime_manifest_parser.parse(runtime_manifest)
+
+      applicable_releases = parsed_runtime_config.get_applicable_releases(deployment)
+      filtered_runtime_manifest["releases"] = filter_releases_array(filtered_runtime_manifest["releases"], applicable_releases)
+
+      applicable_addons = parsed_runtime_config.get_applicable_addons(deployment)
+      filtered_runtime_manifest["addons"] = filter_addons_array(filtered_runtime_manifest["addons"], applicable_addons)
+
+      filtered_runtime_manifest.compact
+    end
+
+    def filter_addons_array(addons, applicable_addons)
+      return nil unless addons && applicable_addons
+
+      filtered_addons = addons.select do |addon|
+        applicable_addons.any?{|applicable_addon|applicable_addon["name"] == addon["name"]}
+      end
+      nil if filtered_addons.empty?
+    end
+
+    def filter_releases_array(releases, applicable_releases)
+      return [] unless releases && applicable_releases
+
+      releases.select do |release|
+        applicable_releases.any?{|applicable_release|applicable_release["name"] == release["name"]}
+      end
+    end
+
     private
 
-    def self.load_manifest(manifest_hash, manifest_text, cloud_config, runtime_config, options = {})
+    def self.load_manifest(manifest_hash, manifest_text, cloud_config, runtime_config, teams, options = {})
       resolve_interpolation = options.fetch(:resolve_interpolation, true)
       ignore_cloud_config = options.fetch(:ignore_cloud_config, false)
 
@@ -70,7 +111,7 @@ module Bosh::Director
         runtime_config_hash = runtime_config.interpolate_manifest_for_deployment(deployment_name)
       end
 
-      new(manifest_hash, manifest_text, cloud_config_hash, runtime_config_hash)
+      new(manifest_hash, manifest_text, cloud_config_hash, runtime_config_hash, teams)
     end
 
     def resolve_aliases_for_generic_hash(generic_hash)

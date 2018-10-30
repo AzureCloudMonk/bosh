@@ -71,7 +71,7 @@ module Bosh::Director
           end
 
           manifest_text = @options.fetch('manifest_text', @manifest_text)
-          deployment_manifest_object = Manifest.load_from_hash(manifest_hash, manifest_text, cloud_config_models, runtime_config_models)
+          deployment_manifest_object = Manifest.load_from_hash(manifest_hash, manifest_text, cloud_config_models, runtime_config_models, deployment_model.teams)
 
           @notifier = DeploymentPlan::Notifier.new(@deployment_name, Config.nats_rpc, logger)
           @notifier.send_start_event unless dry_run?
